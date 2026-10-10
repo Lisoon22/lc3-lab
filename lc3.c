@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define MEMORY_MAX (1 << 16)
 
@@ -49,6 +50,18 @@ enum
     FL_NEG = 1 << 2, /* N */
 };
 
+enum
+{
+    TRAP_GETC = 0x20,  /* get character from keyboard, not echoed onto the terminal */
+    TRAP_OUT = 0x21,   /* output a character */
+    TRAP_PUTS = 0x22,  /* output a word string */
+    TRAP_IN = 0x23,    /* get character from keyboard, echoed onto the terminal */
+    TRAP_PUTSP = 0x24, /* output a byte string */
+    TRAP_HALT = 0x25   /* halt the program */
+};
+
+
+
 uint16_t sign_extend(uint16_t x, int bit_count)
 {
     if ((x >> (bit_count - 1)) & 1) {
@@ -92,11 +105,8 @@ int main(int argc, const char* argv[])
     }
     @{Setup}
 
-    /* since exactly one condition flag should be set at any given time, set the Z flag */
     reg[R_COND] = FL_ZRO;
 
-    /* set the PC to starting position */
-    /* 0x3000 is the default */
     enum { PC_START = 0x3000 };
     reg[R_PC] = PC_START;
 
@@ -167,15 +177,33 @@ int main(int argc, const char* argv[])
                 }
                 break;
             }
-            case OP_JMP:
-                @{JMP}
+            case OP_JMP:{
+                uint16_t r1 = (instr >> 6) & 0x7;
+                reg[R_PC] = reg[r1];
                 break;
-            case OP_JSR:
-                @{JSR}
+            }
+            case OP_JSR:{
+                uint16_t return_address = reg[R_PC];
+                uint16_t amb = (instr >> 11) & 0x1; //addressing mode bit
+                if(amb){
+                    uint16_t pc_offset = sign_extend(instr & 0x7FF, 11);
+                    reg[R_PC] += pc_offset;
+                }
+                else{
+                    uint16_t r1 = (instr >> 6) & 0x7;
+                    reg[R_PC] = reg[r1];
+                }
+                reg[R_R7] = return_address;
                 break;
-            case OP_LD:
-                @{LD}
+            }
+            case OP_LD:{
+                uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
+                uint16_t r0 = (instr >> 9) & 0x7;
+
+                reg[r0] = mem_read(reg[R_PC] + pc_offset);
+                update_flags(r0);
                 break;
+            }
             case OP_LDI:{
                 uint16_t r0 = (instr >> 9) & 0x7; //  destination register
                 uint16_t pc_offset = sign_extend(instr & 0x1FF, 9); // offset
@@ -183,23 +211,97 @@ int main(int argc, const char* argv[])
                 update_flags(r0);
                 break;
             }
-            case OP_LDR:
-                @{LDR}
+            case OP_LDR:{
+                uint16_t r0 = (instr >> 9) & 0x7;
+                uint16_t r1 = (instr >> 6) & 0x7;
+                uint16_t offset = sign_extend(instr & 0x3F, 6);
+                reg[r0] = mem_read(reg[r1] + offset);
+                update_flags(r0);
                 break;
-            case OP_LEA:
-                @{LEA}
+            }
+            case OP_LEA:{
+                uint16_t r0 = (instr >> 9) & 0x7;
+                uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
+                reg[r0] = (uint16_t)(reg[R_PC] + pc_offset);
+                update_flags(r0);
                 break;
-            case OP_ST:
-                @{ST}
+            }
+            case OP_ST:{
+                uint16_t r0 = (instr >> 9) & 0x7;
+                uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
+                mem_write(reg[R_PC]+pc_offset, reg[r0]);
                 break;
-            case OP_STI:
-                @{STI}
+            }
+            case OP_STI:{
+                uint16_t r0 = (instr >> 9) & 0x7;
+                uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
+                mem_write(mem_read(reg[R_PC]+pc_offset), reg[r0]);
                 break;
-            case OP_STR:
-                @{STR}
+            }
+            case OP_STR:{
+                uint16_t r0 = (instr >> 9) & 0x7;
+                uint16_t r1 = (instr >> 6) & 0x7;
+                uint16_t offset = sign_extend(instr & 0x3F, 6);
+
+                mem_write(reg[r1] + offset, reg[r0]);
                 break;
-            case OP_TRAP:
-                @{TRAP}
+            }
+            case OP_TRAP:{
+                reg[R_R7] = reg[R_PC];
+
+                switch (instr & 0xFF)
+                {
+                    case TRAP_PUTS:{
+                        uint16_t* c = memory + reg[R_R0];
+                        while (*c)
+                        {
+                            putc((char)*c, stdout);
+                            ++c;
+                        }
+                        fflush(stdout);
+                        break;
+                    }
+                    case TRAP_GETC:{
+                     reg[R_R0] = (uint16_t)getchar();
+                     update_flags(R_R0);
+                        break;
+                    }
+                    case TRAP_OUT:{
+                        putc((char)reg[R_R0], stdout);
+                        fflush(stdout);
+                        break;
+                    }
+                    case TRAP_IN:{
+                        printf("Enter a character:");
+                        char c = getchar();
+                        putc(c, stdout);
+                        fflush(stdout);
+                        reg[R_R0] = (uint16_t)c;
+                        update_flags(R_R0);
+                        break;
+                    }
+                    case TRAP_PUTSP:{
+                        uint16_t* c = memory + reg[R_R0];
+                        while (*c)
+                        {
+                            char char1 = (*c) & 0xFF;
+                            putc(char1, stdout);
+                            char char2 = (*c) >> 8;
+                            if (char2) putc(char2, stdout);
+                            ++c;
+                        }
+                        fflush(stdout);
+
+                        break;
+                    }
+                    case TRAP_HALT:{
+                        puts("HALTING");
+                        fflush(stdout);
+                        running = 0;
+                        break;
+                    }
+                }
+            }
                 break;
             case OP_RES:
             case OP_RTI:
